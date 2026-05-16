@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Controle Financeiro Ramzi - IPTV</title>
+    <meta name="theme-color" content="#050505">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="https://placehold.co/192x192/050505/3b82f6?text=TV">
+    <link rel="manifest" id="pwa-manifest">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #050505; color: #fff; overflow: hidden; height: 100vh; margin: 0; }
+        .focusable { border: 3px solid transparent; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); outline: none; }
+        .focusable.focused { border-color: #3b82f6; background: rgba(59, 130, 246, 0.3) !important; transform: scale(1.02); box-shadow: 0 0 25px rgba(59, 130, 246, 0.5); z-index: 10; }
+        .channel-card.active { background: #1e40af !important; border-left: 6px solid #60a5fa; }
+        .sidebar { width: 380px; height: 100vh; background: #0f0f0f; border-right: 1px solid #222; transition: transform 0.4s ease-in-out; }
+        .player-area { flex: 1; height: 100vh; background: #000; position: relative; overflow: hidden; }
+        body.cinema-mode .sidebar { transform: translateX(-100%); position: absolute; }
+        body.cinema-mode .player-area { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 100; }
+        #video-player { width: 100%; height: 100%; object-fit: contain; }
+        #fav-progress-container { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 200px; height: 10px; background: rgba(0,0,0,0.8); border-radius: 10px; border: 2px solid #333; display: none; z-index: 999; }
+        #fav-progress-bar { width: 0%; height: 100%; background: #fbbf24; border-radius: 10px; transition: width 0.1s linear; }
+        .star-fav { color: #fbbf24; }
+        .star-empty { color: #3f3f46; }
+        ::-webkit-scrollbar { width: 0; }
+    </style>
+</head>
+<body class="flex">
+    <div id="fav-progress-container">
+        <div id="fav-progress-bar"></div>
+        <p class="text-[10px] text-center mt-2 font-bold uppercase tracking-widest text-yellow-500">Segure OK para Favoritar</p>
+    </div>
+    <aside id="sidebar" class="sidebar flex flex-col p-5 z-20">
+        <div class="mb-4 text-center">
+            <h1 class="text-xl font-bold text-blue-500 flex items-center justify-center gap-2"><i class="fa fa-tv"></i> meu assistente</h1>
+            <p id="status-text" class="text-[10px] text-zinc-500 uppercase mt-1 tracking-widest">Buscando canais...</p>
+        </div>
+        <div class="relative mb-4">
+            <input type="text" id="search-input" placeholder="Buscar canal..." class="focusable w-full bg-zinc-900 border-none rounded-xl py-3 px-4 text-sm text-white">
+        </div>
+        <div class="flex gap-2 text-xs font-bold mb-4">
+            <button id="btn-all" class="focusable flex-1 py-3 bg-zinc-800 rounded-xl uppercase">Todos</button>
+            <button id="btn-favs" class="focusable flex-1 py-3 bg-zinc-800 rounded-xl uppercase">Favoritos</button>
+        </div>
+        <div id="channel-list" class="flex-1 overflow-y-auto space-y-2 pr-1"></div>
+    </aside>
+    <main class="player-area flex items-center justify-center">
+        <video id="video-player" poster="
