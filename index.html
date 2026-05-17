@@ -1,361 +1,542 @@
-// URL da Lista de canais original (Região MENA)
-const M3U_URL = 'https://iptv-org.github.io/iptv/regions/mena.m3u';
-
-// Servidores proxy alternativos para contornar restrições de CORS na TV Box
-const PROXIES = [
-    'https://api.allorigins.win/raw?url=',
-    'https://corsproxy.io/?url=',
-    '' // Conexão direta como último recurso
-];
-
-let proxyIndex = 0;
-let allChannels = [];
-let favorites = JSON.parse(localStorage.getItem('inet_favs_v2')) || [];
-let currentTab = 'all';
-let focusedIndex = 0; 
-let hls = null;
-let selectedUrl = null;
-let longPressTimer = null;
-let lastEnterTime = 0; // Registo temporal para detectar duplo clique
-const LONG_PRESS_DURATION = 5000; // Tempo de ativação de favoritos: 5 segundos
-
-const video = document.getElementById('video-player');
-const listContainer = document.getElementById('channel-list');
-const searchInput = document.getElementById('search-input');
-const statusText = document.getElementById('status-text');
-const progressContainer = document.getElementById('fav-progress-container');
-const progressBar = document.getElementById('fav-progress-bar');
-
-window.onload = () => {
-    loadChannels();
-    setupInteractions();
-};
-
-// Realiza o carregamento da lista de canais contornando bloqueios CORS
-async function loadChannels() {
-    statusText.innerText = "A Ligar...";
-    const proxy = PROXIES[proxyIndex];
-    const url = proxy ? proxy + encodeURIComponent(M3U_URL) : M3U_URL;
-
-    try {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("Erro na resposta de rede");
-        const text = await res.text();
-        if (text.includes('#EXTM3U')) {
-            parseM3U(text);
-        } else {
-            throw new Error("Formato de lista M3U inválido");
-        }
-    } catch (e) {
-        console.warn("Falha ao carregar com proxy " + proxyIndex + ". A testar o próximo...");
-        if (proxyIndex < PROXIES.length - 1) {
-            proxyIndex++;
-            loadChannels();
-        } else {
-            statusText.innerText = "Erro ao Carregar Lista";
-        }
-    }
-}
-
-// Processa o conteúdo do ficheiro M3U e extrai os canais
-function parseM3U(content) {
-    allChannels = [];
-    const lines = content.split('\n');
-    let current = null;
-    for (let line of lines) {
-        line = line.trim();
-        if (line.startsWith('#EXTINF:')) {
-            const name = line.split(',').pop().trim();
-            const logo = line.match(/tvg-logo="([^"]+)"/)?.[1] || '';
-            current = { name, logo };
-        } else if (line.startsWith('http') && current) {
-            current.url = line;
-            allChannels.push(current);
-            current = null;
-        }
-    }
+<!DOCTYPE html>
+<html lang="pt-pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iNet 4K IPTV</title>
+    <meta name="theme-color" content="#050505">
+    <meta name="mobile-web-app-capable" content="yes">
     
-    if (allChannels.length > 0) {
-        statusText.innerText = allChannels.length + " Canais Carregados";
-        renderChannels();
-        focusedIndex = 2; // Inicia o foco no primeiro card de canal disponível
-        updateFocus();
-    } else {
-        statusText.innerText = "Nenhum Canal Encontrado";
-    }
-}
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background-color: #030303; 
+            color: #fff; 
+            overflow: hidden; 
+            height: 100vh; 
+            margin: 0;
+        }
 
-// Renderiza a lista de canais de acordo com a aba e pesquisa atual
-function renderChannels() {
-    const query = searchInput.value.toLowerCase();
-    let base = currentTab === 'all' ? allChannels : allChannels.filter(c => favorites.includes(c.url));
-    const filtered = base.filter(c => c.name.toLowerCase().includes(query));
+        /* Foco visual destacado para comando físico da TV Box */
+        .focusable {
+            border: 3px solid transparent;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            outline: none;
+        }
 
-    if (filtered.length === 0) {
-        listContainer.innerHTML = `<p class="p-8 text-center text-zinc-600 text-sm">Nenhum canal localizado.</p>`;
-        return;
-    }
+        .focusable.focused {
+            border-color: #3b82f6;
+            background: rgba(59, 130, 246, 0.25) !important;
+            transform: scale(1.02);
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
+            z-index: 10;
+        }
 
-    listContainer.innerHTML = filtered.map((c, idx) => {
-        const isFav = favorites.includes(c.url);
-        return `
-        <div class="channel-card focusable p-3.5 rounded-xl flex items-center gap-4 bg-zinc-900/40 mb-2 cursor-pointer ${selectedUrl === c.url ? 'active' : ''}" 
-             id="chan-${idx}" data-index="${idx}" data-url="${c.url}">
-            <img src="${c.logo}" class="w-9 h-9 object-contain bg-zinc-900 rounded border border-zinc-800 shrink-0" onerror="this.src='https://placehold.co/40x40/111/444?text=TV'">
-            <p class="font-semibold text-sm truncate uppercase flex-1 text-zinc-200">${c.name}</p>
-            <i class="fa fa-star ${isFav ? 'star-fav' : 'star-empty'}"></i>
-        </div>
-    `}).join('');
-}
+        .channel-card.active {
+            background: rgba(30, 64, 175, 0.8) !important;
+            border-left: 6px solid #3b82f6;
+        }
 
-// Configuração dos eventos de teclado (comando físico da box) e interações
-function setupInteractions() {
-    document.addEventListener('keydown', (e) => {
-        const focusables = document.querySelectorAll('.focusable');
-        const isCinema = document.body.classList.contains('cinema-mode');
+        /* Indicador de progresso ao manter o OK pressionado por 5 segundos */
+        #fav-progress-container {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 240px;
+            background: rgba(0, 0, 0, 0.9);
+            border: 2px solid #222;
+            padding: 15px;
+            border-radius: 20px;
+            display: none;
+            z-index: 999;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            text-align: center;
+        }
+
+        #fav-progress-bar {
+            width: 0%;
+            height: 8px;
+            background: #eab308;
+            border-radius: 10px;
+            transition: width 0.1s linear;
+        }
+
+        .star-fav { color: #eab308; }
+        .star-empty { color: #3f3f46; }
+
+        /* Estilo para ocultar a sidebar e esticar o player no modo ecrã inteiro */
+        body.cinema-mode #sidebar {
+            display: none !important;
+        }
         
-        if ([37, 38, 39, 40].includes(e.keyCode)) e.preventDefault();
+        body.cinema-mode #player-area {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 100;
+        }
 
-        switch(e.keyCode) {
-            case 38: // Seta Para Cima
-                if (!isCinema && focusedIndex > 0) {
-                    focusedIndex--;
-                    updateFocus();
-                }
-                break;
-            case 40: // Seta Para Baixo
-                if (!isCinema && focusedIndex < focusables.length - 1) {
-                    focusedIndex++;
-                    updateFocus();
-                }
-                break;
-            case 37: // Seta Para a Esquerda (Muda para aba Todos)
-                if (!isCinema) {
-                    document.getElementById('btn-all').click();
-                }
-                break;
-            case 39: // Seta Para a Direita (Muda para aba Favoritos)
-                if (!isCinema) {
-                    document.getElementById('btn-favs').click();
-                }
-                break;
-            case 13: // Tecla OK ou Enter do teclado
-                if (isCinema) {
-                    toggleCinema(false);
-                    return;
-                }
+        /* Barra de rolagem discreta */
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #27272a;
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body class="flex h-screen w-screen overflow-hidden select-none">
 
-                // DETECÇÃO DE DUPLO CLIQUE (Dbl Enter)
-                const now = Date.now();
-                if (now - lastEnterTime < 450) {
-                    const item = focusables[focusedIndex];
-                    if (item && item.classList.contains('channel-card')) {
-                        toggleCinema(true);
-                        if (longPressTimer) {
-                            clearInterval(longPressTimer);
-                            longPressTimer = null;
-                            progressContainer.style.display = 'none';
+    <div id="fav-progress-container">
+        <div class="w-full bg-zinc-800 h-2 rounded-full overflow-hidden mb-2">
+            <div id="fav-progress-bar"></div>
+        </div>
+        <p class="text-[10px] font-bold uppercase tracking-widest text-yellow-500">A Adicionar aos Favoritos...</p>
+    </div>
+
+    <aside id="sidebar" class="w-[380px] bg-zinc-950 border-r border-zinc-900 flex flex-col p-5 z-20 shrink-0 transition-all duration-300">
+        <div class="mb-5 text-center">
+            <h1 class="text-2xl font-black text-blue-500 flex items-center justify-center gap-2 tracking-tight">
+                <i class="fa fa-tv text-xl animate-pulse"></i> iNet 4K <span class="text-[10px] bg-blue-600/20 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">Live</span>
+            </h1>
+            <p id="status-text" class="text-[10px] text-zinc-500 uppercase mt-1.5 tracking-widest font-bold">A Iniciar...</p>
+        </div>
+
+        <div class="relative mb-4">
+            <span class="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 text-sm">
+                <i class="fa fa-search"></i>
+            </span>
+            <input type="text" id="search-input" placeholder="Pesquisar canal..." 
+                   class="focusable w-full bg-zinc-900 border-none rounded-xl py-3.5 pl-11 pr-4 text-sm text-white placeholder-zinc-500">
+        </div>
+
+        <div class="flex gap-2 text-xs font-bold mb-4">
+            <button id="btn-all" class="focusable flex-1 py-3 bg-zinc-900 hover:bg-zinc-800 rounded-xl uppercase tracking-wider text-blue-400">Todos</button>
+            <button id="btn-favs" class="focusable flex-1 py-3 bg-zinc-900 hover:bg-zinc-800 rounded-xl uppercase tracking-wider text-zinc-400">Favoritos</button>
+        </div>
+
+        <div id="channel-list" class="flex-1 overflow-y-auto space-y-2 pr-1">
+            </div>
+
+        <div class="mt-4 p-3 bg-zinc-900/40 rounded-xl border border-zinc-800/60 text-[11px] text-zinc-500 leading-relaxed">
+            <p class="font-bold text-zinc-400 mb-1"><i class="fa fa-gamepad mr-1"></i> Teclas do Comando:</p>
+            <ul class="space-y-1">
+                <li><b class="text-zinc-300">Setas Cima/Baixo:</b> Navega na lista</li>
+                <li><b class="text-zinc-300">Um clique em OK:</b> Inicia o canal</li>
+                <li><b class="text-zinc-300">Dois cliques em OK:</b> Ecrã Inteiro (Tela Cheia) 📺</li>
+                <li><b class="text-zinc-300">Segurar OK (5 seg):</b> Adiciona a Favoritos ⭐</li>
+                <li><b class="text-zinc-300">Tecla Voltar (Back):</b> Sai do ecrã inteiro</li>
+            </ul>
+        </div>
+    </aside>
+
+    <main id="player-area" class="flex-1 bg-black relative flex items-center justify-center">
+        <video id="video-player" class="w-full h-full object-contain" poster="https://images.unsplash.com/photo-1574375927938-d5a98e8edd86?auto=format&fit=crop&w=1280&q=80" playsinline></video>
+        
+        <div id="info-overlay" class="absolute bottom-8 left-8 right-8 bg-zinc-950/95 p-5 rounded-2xl border border-zinc-800 flex items-center gap-5 opacity-0 transition-opacity duration-300 pointer-events-none z-[150] shadow-2xl">
+            <div class="w-16 h-16 bg-zinc-900 rounded-xl flex items-center justify-center border border-zinc-800 shrink-0">
+                <i class="fa fa-play text-2xl text-blue-500"></i>
+            </div>
+            <div class="flex-1">
+                <span class="bg-blue-600 text-white text-[9px] px-2 py-0.5 rounded font-black uppercase tracking-wider">A Emitir Agora</span>
+                <h2 id="info-name" class="text-2xl font-bold text-white mt-1">Nome do Canal</h2>
+                <p id="info-category" class="text-xs text-zinc-400 mt-0.5">Categoria: REGIONAL TV</p>
+            </div>
+            <i id="info-star" class="fa fa-star text-2xl star-empty"></i>
+        </div>
+
+        <div id="error-screen" class="absolute inset-0 bg-black/95 flex flex-col items-center justify-center hidden z-[200] p-10 text-center">
+            <i class="fa fa-triangle-exclamation text-6xl text-yellow-500 mb-6 animate-bounce"></i>
+            <h2 id="error-title" class="text-2xl font-bold mb-2">Canal Indisponível</h2>
+            <p id="error-desc" class="text-zinc-400 max-w-sm mb-8 text-sm">A tentar estabelecer ligação ou a saltar automaticamente...</p>
+        </div>
+    </main>
+
+    <script>
+        // URL da Lista de canais original (Região MENA)
+        const M3U_URL = 'https://iptv-org.github.io/iptv/regions/mena.m3u';
+        
+        // Servidores proxy alternativos para contornar restrições de CORS na TV Box
+        const PROXIES = [
+            'https://api.allorigins.win/raw?url=',
+            'https://corsproxy.io/?url=',
+            '' // Conexão direta como último recurso
+        ];
+        
+        let proxyIndex = 0;
+        let allChannels = [];
+        let favorites = JSON.parse(localStorage.getItem('inet_favs_v2')) || [];
+        let currentTab = 'all';
+        let focusedIndex = 0; 
+        let hls = null;
+        let selectedUrl = null;
+        let longPressTimer = null;
+        let lastEnterTime = 0; // Registo temporal para detectar duplo clique
+        const LONG_PRESS_DURATION = 5000; // Tempo de ativação de favoritos: 5 segundos
+
+        const video = document.getElementById('video-player');
+        const listContainer = document.getElementById('channel-list');
+        const searchInput = document.getElementById('search-input');
+        const statusText = document.getElementById('status-text');
+        const progressContainer = document.getElementById('fav-progress-container');
+        const progressBar = document.getElementById('fav-progress-bar');
+
+        window.onload = () => {
+            loadChannels();
+            setupInteractions();
+        };
+
+        // Realiza o carregamento da lista de canais contornando bloqueios CORS
+        async function loadChannels() {
+            statusText.innerText = "A Ligar...";
+            const proxy = PROXIES[proxyIndex];
+            const url = proxy ? proxy + encodeURIComponent(M3U_URL) : M3U_URL;
+
+            try {
+                const res = await fetch(url);
+                if (!res.ok) throw new Error("Erro na resposta de rede");
+                const text = await res.text();
+                if (text.includes('#EXTM3U')) {
+                    parseM3U(text);
+                } else {
+                    throw new Error("Formato de lista M3U inválido");
+                }
+            } catch (e) {
+                console.warn("Falha ao carregar com proxy " + proxyIndex + ". A testar o próximo...");
+                if (proxyIndex < PROXIES.length - 1) {
+                    proxyIndex++;
+                    loadChannels();
+                } else {
+                    statusText.innerText = "Erro ao Carregar Lista";
+                }
+            }
+        }
+
+        // Processa o conteúdo do ficheiro M3U e extrai os canais
+        function parseM3U(content) {
+            allChannels = [];
+            const lines = content.split('\n');
+            let current = null;
+            for (let line of lines) {
+                line = line.trim();
+                if (line.startsWith('#EXTINF:')) {
+                    const name = line.split(',').pop().trim();
+                    const logo = line.match(/tvg-logo="([^"]+)"/)?.[1] || '';
+                    current = { name, logo };
+                } else if (line.startsWith('http') && current) {
+                    current.url = line;
+                    allChannels.push(current);
+                    current = null;
+                }
+            }
+            
+            if (allChannels.length > 0) {
+                statusText.innerText = allChannels.length + " Canais Carregados";
+                renderChannels();
+                focusedIndex = 2; // Inicia o foco no primeiro card de canal disponível
+                updateFocus();
+            } else {
+                statusText.innerText = "Nenhum Canal Encontrado";
+            }
+        }
+
+        // Renderiza a lista de canais de acordo com a aba e pesquisa atual
+        function renderChannels() {
+            const query = searchInput.value.toLowerCase();
+            let base = currentTab === 'all' ? allChannels : allChannels.filter(c => favorites.includes(c.url));
+            const filtered = base.filter(c => c.name.toLowerCase().includes(query));
+
+            if (filtered.length === 0) {
+                listContainer.innerHTML = `<p class="p-8 text-center text-zinc-600 text-sm">Nenhum canal localizado.</p>`;
+                return;
+            }
+
+            listContainer.innerHTML = filtered.map((c, idx) => {
+                const isFav = favorites.includes(c.url);
+                return `
+                <div class="channel-card focusable p-3.5 rounded-xl flex items-center gap-4 bg-zinc-900/40 mb-2 cursor-pointer ${selectedUrl === c.url ? 'active' : ''}" 
+                     id="chan-${idx}" data-index="${idx}" data-url="${c.url}">
+                    <img src="${c.logo}" class="w-9 h-9 object-contain bg-zinc-900 rounded border border-zinc-800 shrink-0" onerror="this.src='https://placehold.co/40x40/111/444?text=TV'">
+                    <p class="font-semibold text-sm truncate uppercase flex-1 text-zinc-200">${c.name}</p>
+                    <i class="fa fa-star ${isFav ? 'star-fav' : 'star-empty'}"></i>
+                </div>
+            `;}).join('');
+        }
+
+        // Configuração dos eventos de teclado (comando físico da box) e interações
+        function setupInteractions() {
+            document.addEventListener('keydown', (e) => {
+                const focusables = document.querySelectorAll('.focusable');
+                const isCinema = document.body.classList.contains('cinema-mode');
+                
+                if ([37, 38, 39, 40].includes(e.keyCode)) e.preventDefault();
+
+                switch(e.keyCode) {
+                    case 38: // Seta Para Cima
+                        if (!isCinema && focusedIndex > 0) {
+                            focusedIndex--;
+                            updateFocus();
+                        }
+                        break;
+                    case 40: // Seta Para Baixo
+                        if (!isCinema && focusedIndex < focusables.length - 1) {
+                            focusedIndex++;
+                            updateFocus();
+                        }
+                        break;
+                    case 37: // Seta Para a Esquerda (Muda para aba Todos)
+                        if (!isCinema) {
+                            document.getElementById('btn-all').click();
+                        }
+                        break;
+                    case 39: // Seta Para a Direita (Muda para aba Favoritos)
+                        if (!isCinema) {
+                            document.getElementById('btn-favs').click();
+                        }
+                        break;
+                    case 13: // Tecla OK ou Enter do teclado
+                        if (isCinema) {
+                            // Se já estiver em ecrã inteiro, um clique no OK sai do ecrã inteiro
+                            toggleCinema(false);
+                            return;
+                        }
+
+                        // DETECÇÃO DE DUPLO CLIQUE (Dbl Enter)
+                        const now = Date.now();
+                        if (now - lastEnterTime < 450) {
+                            const item = focusables[focusedIndex];
+                            if (item && item.classList.contains('channel-card')) {
+                                toggleCinema(true);
+                                // Cancelar o temporizador de favorito para evitar conflito
+                                if (longPressTimer) {
+                                    clearInterval(longPressTimer);
+                                    longPressTimer = null;
+                                    progressContainer.style.display = 'none';
+                                }
+                                lastEnterTime = now;
+                                return;
+                            }
                         }
                         lastEnterTime = now;
-                        return;
-                    }
+
+                        // Se não for duplo clique, inicia a contagem para Favorito (Segurando)
+                        if (!longPressTimer) startLongPress();
+                        break;
+
+                    case 8: case 27: // Tecla de Retroceder (Backspace / Back) ou Esc
+                        if (isCinema) {
+                            toggleCinema(false);
+                            e.preventDefault();
+                        }
+                        break;
                 }
-                lastEnterTime = now;
+            });
 
-                if (!longPressTimer) startLongPress();
-                break;
-
-            case 8: case 27: // Tecla de Retroceder (Backspace) ou Esc
-                if (isCinema) {
-                    toggleCinema(false);
-                    e.preventDefault();
+            document.addEventListener('keyup', (e) => {
+                if (e.keyCode === 13) {
+                    endLongPress();
                 }
-                break;
+            });
+
+            // Seleção de Abas
+            document.getElementById('btn-all').onclick = () => {
+                currentTab = 'all';
+                document.getElementById('btn-all').classList.add('text-blue-400');
+                document.getElementById('btn-favs').classList.remove('text-blue-400');
+                renderChannels();
+                focusedIndex = 2;
+                updateFocus();
+            };
+
+            document.getElementById('btn-favs').onclick = () => {
+                currentTab = 'favs';
+                document.getElementById('btn-favs').classList.add('text-blue-400');
+                document.getElementById('btn-all').classList.remove('text-blue-400');
+                renderChannels();
+                focusedIndex = 2;
+                updateFocus();
+            };
+
+            // Listener de pesquisa em tempo real
+            searchInput.addEventListener('input', () => {
+                renderChannels();
+            });
+
+            // Clique alternativo com rato (mouse) para suporte híbrido
+            listContainer.addEventListener('click', (e) => {
+                const card = e.target.closest('.channel-card');
+                if (card) {
+                    const url = card.dataset.url;
+                    handleSelect(url);
+                }
+            });
+
+            // Duplo clique com o rato ou duplo toque no ecrã para ir para ecrã inteiro
+            listContainer.addEventListener('dblclick', (e) => {
+                const card = e.target.closest('.channel-card');
+                if (card) {
+                    toggleCinema(true);
+                }
+            });
+
+            // Se o utilizador clicar na área do player de vídeo, alterna o ecrã inteiro
+            document.getElementById('player-area').addEventListener('click', () => {
+                const isCinema = document.body.classList.contains('cinema-mode');
+                toggleCinema(!isCinema);
+            });
         }
-    });
 
-    document.addEventListener('keyup', (e) => {
-        if (e.keyCode === 13) {
-            endLongPress();
+        // --- SISTEMA PREMUTA DE FAVORITOS (OK PRESSIONADO POR 5 SEGUNDOS) ---
+        function startLongPress() {
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            
+            let start = Date.now();
+            longPressTimer = setInterval(() => {
+                let elapsed = Date.now() - start;
+                let pct = (elapsed / LONG_PRESS_DURATION) * 100;
+                progressBar.style.width = Math.min(pct, 100) + '%';
+                
+                if (elapsed >= LONG_PRESS_DURATION) {
+                    clearInterval(longPressTimer);
+                    longPressTimer = "DONE";
+                    toggleFavoriteCurrent();
+                    setTimeout(() => { 
+                        progressContainer.style.display = 'none'; 
+                    }, 500);
+                }
+            }, 50);
         }
-    });
 
-    // Seleção de Abas
-    document.getElementById('btn-all').onclick = () => {
-        currentTab = 'all';
-        document.getElementById('btn-all').classList.add('text-blue-400');
-        document.getElementById('btn-favs').classList.remove('text-blue-400');
-        renderChannels();
-        focusedIndex = 2;
-        updateFocus();
-    };
-
-    document.getElementById('btn-favs').onclick = () => {
-        currentTab = 'favs';
-        document.getElementById('btn-favs').classList.add('text-blue-400');
-        document.getElementById('btn-all').classList.remove('text-blue-400');
-        renderChannels();
-        focusedIndex = 2;
-        updateFocus();
-    };
-
-    searchInput.addEventListener('input', () => {
-        renderChannels();
-    });
-
-    listContainer.addEventListener('click', (e) => {
-        const card = e.target.closest('.channel-card');
-        if (card) {
-            const url = card.dataset.url;
-            handleSelect(url);
+        function endLongPress() {
+            if (longPressTimer && longPressTimer !== "DONE") {
+                clearInterval(longPressTimer);
+                // Toque rápido: inicia reprodução normal
+                handleNormalOK();
+            }
+            if (longPressTimer !== "DONE") {
+                progressContainer.style.display = 'none';
+            }
+            longPressTimer = null;
         }
-    });
 
-    listContainer.addEventListener('dblclick', (e) => {
-        const card = e.target.closest('.channel-card');
-        if (card) {
-            toggleCinema(true);
+        // Aciona o clique no elemento focado por toque rápido de OK
+        function handleNormalOK() {
+            const focusables = document.querySelectorAll('.focusable');
+            const element = focusables[focusedIndex];
+            if (!element) return;
+
+            if (element.classList.contains('channel-card')) {
+                handleSelect(element.dataset.url);
+            } else {
+                element.click();
+                if (element === searchInput) searchInput.focus();
+            }
         }
-    });
 
-    document.getElementById('player-area').addEventListener('click', () => {
-        const isCinema = document.body.classList.contains('cinema-mode');
-        toggleCinema(!isCinema);
-    });
-}
+        function toggleFavoriteCurrent() {
+            const focusables = document.querySelectorAll('.focusable');
+            const element = focusables[focusedIndex];
+            const urlToFav = element?.dataset?.url || selectedUrl;
 
-// --- SISTEMA PREMUTA DE FAVORITOS (OK PRESSIONADO POR 5 SEGUNDOS) ---
-function startLongPress() {
-    progressContainer.style.display = 'block';
-    progressBar.style.width = '0%';
-    
-    let start = Date.now();
-    longPressTimer = setInterval(() => {
-        let elapsed = Date.now() - start;
-        let pct = (elapsed / LONG_PRESS_DURATION) * 100;
-        progressBar.style.width = Math.min(pct, 100) + '%';
-        
-        if (elapsed >= LONG_PRESS_DURATION) {
-            clearInterval(longPressTimer);
-            longPressTimer = "DONE";
-            toggleFavoriteCurrent();
-            setTimeout(() => { 
-                progressContainer.style.display = 'none'; 
-            }, 500);
+            if (urlToFav) {
+                if (favorites.includes(urlToFav)) {
+                    favorites = favorites.filter(f => f !== urlToFav);
+                } else {
+                    favorites.push(urlToFav);
+                }
+                localStorage.setItem('inet_favs_v2', JSON.stringify(favorites));
+                renderChannels();
+                showInfoHUD(urlToFav);
+            }
         }
-    }, 50);
-}
 
-function endLongPress() {
-    if (longPressTimer && longPressTimer !== "DONE") {
-        clearInterval(longPressTimer);
-        handleNormalOK();
-    }
-    if (longPressTimer !== "DONE") {
-        progressContainer.style.display = 'none';
-    }
-    longPressTimer = null;
-}
-
-function handleNormalOK() {
-    const focusables = document.querySelectorAll('.focusable');
-    const element = focusables[focusedIndex];
-    if (!element) return;
-
-    if (element.classList.contains('channel-card')) {
-        handleSelect(element.dataset.url);
-    } else {
-        element.click();
-        if (element === searchInput) searchInput.focus();
-    }
-}
-
-function toggleFavoriteCurrent() {
-    const focusables = document.querySelectorAll('.focusable');
-    const element = focusables[focusedIndex];
-    const urlToFav = element?.dataset?.url || selectedUrl;
-
-    if (urlToFav) {
-        if (favorites.includes(urlToFav)) {
-            favorites = favorites.filter(f => f !== urlToFav);
-        } else {
-            favorites.push(urlToFav);
+        // --- GESTÃO DE CONTROLO DE FOCO ---
+        function updateFocus() {
+            const items = document.querySelectorAll('.focusable');
+            items.forEach(c => c.classList.remove('focused'));
+            if (items[focusedIndex]) {
+                items[focusedIndex].classList.add('focused');
+                items[focusedIndex].scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
         }
-        localStorage.setItem('inet_favs_v2', JSON.stringify(favorites));
-        renderChannels();
-        showInfoHUD(urlToFav);
-    }
-}
 
-function updateFocus() {
-    const items = document.querySelectorAll('.focusable');
-    items.forEach(c => c.classList.remove('focused'));
-    if (items[focusedIndex]) {
-        items[focusedIndex].classList.add('focused');
-        items[focusedIndex].scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }
-}
+        // --- ATIVAÇÃO DE STREAMING E EXIBIÇÃO DE METADADOS ---
+        function handleSelect(url) {
+            if (selectedUrl === url) {
+                // SE JÁ ESTAVA SELECIONADO: Segundo clique de OK alterna para Ecrã Inteiro!
+                const isCinema = document.body.classList.contains('cinema-mode');
+                toggleCinema(!isCinema);
+                return;
+            }
+            selectedUrl = url;
+            renderChannels();
+            playStream(url);
+            showInfoHUD(url);
+        }
 
-function handleSelect(url) {
-    if (selectedUrl === url) {
-        const isCinema = document.body.classList.contains('cinema-mode');
-        toggleCinema(!isCinema);
-        return;
-    }
-    selectedUrl = url;
-    renderChannels();
-    playStream(url);
-    showInfoHUD(url);
-}
+        function playStream(url) {
+            if (hls) hls.destroy();
+            video.pause();
+            showError(false);
 
-function playStream(url) {
-    if (hls) hls.destroy();
-    video.pause();
-    showError(false);
+            if (Hls.isSupported()) {
+                hls = new Hls({ manifestLoadingMaxRetry: 5 });
+                hls.loadSource(url);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
+                hls.on(Hls.Events.ERROR, (e, d) => {
+                    if (d.fatal) showError(true);
+                });
+            } else {
+                video.src = url;
+                video.play().catch(() => showError(true));
+            }
+        }
 
-    if (Hls.isSupported()) {
-        hls = new Hls({ manifestLoadingMaxRetry: 5 });
-        hls.loadSource(url);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
-        hls.on(Hls.Events.ERROR, (e, d) => {
-            if (d.fatal) showError(true);
-        });
-    } else {
-        video.src = url;
-        video.play().catch(() => showError(true));
-    }
-}
+        // Gerencia a transição para ecrã inteiro limpando as dimensões perfeitamente
+        function toggleCinema(active) {
+            if (active) {
+                document.body.classList.add('cinema-mode');
+            } else {
+                document.body.classList.remove('cinema-mode');
+            }
+            setTimeout(() => {
+                window.dispatchEvent(new Event('resize'));
+            }, 100);
+        }
 
-function toggleCinema(active) {
-    if (active) {
-        document.body.classList.add('cinema-mode');
-    } else {
-        document.body.classList.remove('cinema-mode');
-    }
-    setTimeout(() => {
-        window.dispatchEvent(new Event('resize'));
-    }, 100);
-}
+        // Exibe o painel de informações sobre o canal que está a ser transmitido
+        function showInfoHUD(url) {
+            const channel = allChannels.find(c => c.url === url);
+            if (!channel) return;
 
-function showInfoHUD(url) {
-    const channel = allChannels.find(c => c.url === url);
-    if (!channel) return;
+            const overlay = document.getElementById('info-overlay');
+            const star = document.getElementById('info-star');
+            
+            document.getElementById('info-name').innerText = channel.name;
+            star.className = `fa fa-star text-2xl ${favorites.includes(url) ? 'star-fav' : 'star-empty'}`;
 
-    const overlay = document.getElementById('info-overlay');
-    const star = document.getElementById('info-star');
-    
-    document.getElementById('info-name').innerText = channel.name;
-    star.className = `fa fa-star text-2xl ${favorites.includes(url) ? 'star-fav' : 'star-empty'}`;
+            overlay.style.opacity = "1";
+            setTimeout(() => {
+                overlay.style.opacity = "0";
+            }, 4000);
+        }
 
-    overlay.style.opacity = "1";
-    setTimeout(() => {
-        overlay.style.opacity = "0";
-    }, 4000);
-}
-
-function showError(show) {
-    const screen = document.getElementById('error-screen');
-    if (show) screen.classList.remove('hidden');
-    else screen.classList.add('hidden');
-}
+        function showError(show) {
+            const screen = document.getElementById('error-screen');
+            if (show) screen.classList.remove('hidden');
+            else screen.classList.add('hidden');
+        }
+    </script>
+</body>
+</html>
